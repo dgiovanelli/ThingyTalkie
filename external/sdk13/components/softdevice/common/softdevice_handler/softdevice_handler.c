@@ -576,12 +576,13 @@ uint32_t softdevice_enable(uint32_t * ram_start)
 
     NRF_LOG_DEBUG("RAM start at 0x%x.\r\n", app_ram_base);
     err_code = sd_ble_enable(&app_ram_base);
-
+    uint32_t ram_size;
     if (app_ram_base != *ram_start)
     {
         NRF_LOG_WARNING("RAM start should be adjusted to 0x%x.\r\n", app_ram_base);
+        ram_size = ram_end_address_get() - app_ram_base;
         NRF_LOG_WARNING("RAM size should be adjusted to 0x%x.\r\n",
-                        ram_end_address_get() - app_ram_base);
+        		ram_size);
     }
     else if (err_code != NRF_SUCCESS)
     {

@@ -51,12 +51,14 @@
 #include <stdint.h>
 #include "drv_audio_config.h"
 
-/**@brief Compressed audio frame representation.
+/**@brief Compressed and PCM audio frame representation.
  */
 typedef struct
 {
-    uint8_t     data[CONFIG_AUDIO_FRAME_SIZE_BYTES];
-    uint16_t    data_size;
+    uint8_t     data[CONFIG_AUDIO_FRAME_SIZE_BYTES]; //data encoded in adpcm
+    uint16_t    data_size;							 //length of adpcm data
+    uint8_t		*pcm_data;
+	uint16_t	pcm_data_len;
 } m_audio_frame_t;
 
 /**@brief Microphone driver data handler callback type.

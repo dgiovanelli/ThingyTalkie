@@ -80,7 +80,7 @@ static inline q31_t SSAT( q31_t x, q31_t max_y, q31_t min_y)
 
 #if CONFIG_AUDIO_EQUALIZER_ENABLED
 
-typedef struct   /* y[n]=b0*x[n]+b1*x[n-1]+b2*x[n]+a1*y[n-1]+a2*y[n-1]  */
+typedef struct   /* y[n]=b0*x[n]+b1*x[n-1]+b2*x[n-2]+a1*y[n-1]+a2*y[n-2]  */
 {
     q15_t b0;     // [Q2.14]
     q15_t b1;     // [Q2.14]
@@ -114,7 +114,7 @@ static biquad_t biquad1 = {
     .y_2 = (q15_t) 0
 };
 
-static equalizer_q15_t eq1 = {
+static equalizer_q15_t eq2 = {
  .nOfBands = N_BANDS_EQ1,
  .gain = { (q15_t)((0.5f)*Q15_SCALE) },
  .p_biquad = {&biquad1}

@@ -57,10 +57,35 @@
 #include "nrf_delay.h"
 #include "nrf_drv_rng.h"
 #include "support_func.h"
+#include "ble_gap.h"
+//#include "nrf_gattc.h"
+//#include "nrf_ble_gatt.h"
+
+#define L2CAP_HDR_LEN   4   //!< Length of a L2CAP header, in bytes. copied from nrf_ble_gatt.c
 
 #define  NRF_LOG_MODULE_NAME "m_ble         "
+#define NRF_LOG_LEVEL 3
 #include "nrf_log.h"
 #include "macros_common.h"
+
+#define APP_BLE_OBSERVER_PRIO           2
+// <o> SCAN_INTERVAL - Scanning interval, determines scan interval in units of 0.625 millisecond.
+#ifndef SCAN_INTERVAL
+#define SCAN_INTERVAL 80
+#endif
+
+// <o> SCAN_WINDOW - Scanning window, determines scan window in units of 0.625 millisecond.
+#ifndef SCAN_WINDOW
+#define SCAN_WINDOW 80
+#endif
+
+#define CONN_INTERVAL_MIN               (uint16_t)(MSEC_TO_UNITS(7.5, UNIT_1_25_MS))    /**< Minimum acceptable connection interval, in 1.25 ms units. */
+#define CONN_INTERVAL_MAX               (uint16_t)(MSEC_TO_UNITS(20, UNIT_1_25_MS))    /**< Maximum acceptable connection interval, in 1.25 ms units. */
+#define CONN_SUP_TIMEOUT                (uint16_t)(MSEC_TO_UNITS(1000,  UNIT_10_MS))    /**< Connection supervisory timeout (4 seconds). */
+#define SLAVE_LATENCY                   0                                               /**< Slave latency. */
+#define APP_BLE_CONN_CFG_TAG            1//BLE_CONN_CFG_TAG_DEFAULT                                               /**< A tag that refers to the BLE stack configuration. */
+
+#define TCS_UUID_LIT_END {0x42, 0x00, 0x74, 0xa9, 0xff, 0x52, 0x10, 0x9b, 0x33, 0x49, 0x35, 0x9b, 0x00, 0x01, 0x68, 0xef}; //little endian!!
 
 #ifdef BLE_DFU_APP_SUPPORT
     #include "ble_dfu.h"
@@ -78,6 +103,11 @@
 
 #define RANDOM_VECTOR_DEVICE_ID_SIZE         4                                          /** Length of random ID vector. Must be <= 32. */
 
+typedef struct {
+	uint8_t * p_data; /**< Pointer to data. */
+	uint16_t data_len; /**< Length of data. */
+} data_t;
+
 static uint16_t                   m_conn_handle = BLE_CONN_HANDLE_INVALID;              /**< Handle of the current connection. */
 static m_ble_evt_handler_t        m_evt_handler = 0;
 static m_ble_service_handle_t   * m_service_handles = 0;
@@ -90,8 +120,39 @@ static bool                       m_flash_disconnect = false;
 static bool                       m_major_minor_fw_ver_changed = false;
 static char                       m_mac_addr[SUPPORT_FUNC_MAC_ADDR_STR_LEN];            /**< The device MAC address. */
 static uint8_t                    m_random_vector_device_id[RANDOM_VECTOR_DEVICE_ID_SIZE];        /**< Device random ID. Used for NFC BLE pairng on iOS. */
+static const uint8_t			  m_target_uuid_lit_end[] = TCS_UUID_LIT_END;
+
+// Scan parameters requested for scanning and connection.
+static ble_gap_scan_params_t const m_scan_param =
+{
+    .active         = 0x00,
+    .interval       = SCAN_INTERVAL,
+    .window         = SCAN_WINDOW,
+    .use_whitelist  = 0x00,
+    .adv_dir_report = 0x00,
+    .timeout        = 30,
+};
+
+// Connection parameters requested for connection.
+static ble_gap_conn_params_t m_conn_param =
+{
+    .min_conn_interval = CONN_INTERVAL_MIN,   // Minimum connection interval.
+    .max_conn_interval = CONN_INTERVAL_MIN,   // Maximum connection interval.
+    .slave_latency     = SLAVE_LATENCY,       // Slave latency.
+    .conn_sup_timeout  = CONN_SUP_TIMEOUT     // Supervisory timeout.
+};
 
 #define NRF_BLE_MAX_MTU_SIZE            BLE_GATT_ATT_MTU_DEFAULT*12         /**< MTU size used in the softdevice enabling and to reply to a BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST event. */
+
+static ble_gap_data_length_params_t m_dl_params =
+{
+		  .max_tx_octets = (NRF_BLE_MAX_MTU_SIZE + L2CAP_HDR_LEN),   /**< Maximum number of payload octets that a Controller supports for transmission of a single Link Layer Data Channel PDU. */
+		  .max_rx_octets = (NRF_BLE_MAX_MTU_SIZE + L2CAP_HDR_LEN),    /**< Maximum number of payload octets that a Controller supports for reception of a single Link Layer Data Channel PDU. */
+		  .max_tx_time_us = BLE_GAP_DATA_LENGTH_AUTO,  /**< Maximum time, in microseconds, that a Controller supports for transmission of a single Link Layer Data Channel PDU. */
+		  .max_rx_time_us = BLE_GAP_DATA_LENGTH_AUTO
+};
+
+static ble_gap_data_length_limitation_t limitations;
 
 #ifdef BLE_DFU_APP_SUPPORT
     static ble_dfu_t                  m_dfus;                                   /**< Structure used to identify the DFU service. */
@@ -344,7 +405,136 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
     }
 }
 
+/**@brief Parses advertisement data, providing length and location of the field in case
+ *        matching data is found.
+ *
+ * @param[in]  Type of data to be looked for in advertisement data.
+ * @param[in]  Advertisement report length and pointer to report.
+ * @param[out] If data type requested is found in the data report, type data length andwhile(1){
 
+ }
+ *             pointer to data will be populated here.
+ *
+ * @retval NRF_SUCCESS if the data type is found in the report.
+ * @retval NRF_ERROR_NOT_FOUND if the data type could not be found.
+ */
+static uint32_t adv_report_parse(uint8_t type, data_t * p_advdata, data_t * p_typedata) {
+	uint32_t index = 0;
+	uint8_t * p_data;
+
+	p_data = p_advdata->p_data;
+
+	while (index < p_advdata->data_len) {
+		uint8_t field_length = p_data[index];
+		uint8_t field_type = p_data[index + 1];
+
+		if (field_type == type) {
+			p_typedata->p_data = &p_data[index + 2];
+			p_typedata->data_len = field_length - 1;
+			return NRF_SUCCESS;
+		}
+		index += field_length + 1;
+	}
+	return NRF_ERROR_NOT_FOUND;
+}
+
+//finds the first 16bit uuid included in the adv data
+static uint32_t get_adv_128bit_uuid(ble_gap_evt_adv_report_t const * p_adv_report, data_t * uuid_data) {
+
+	ret_code_t err_code;
+	data_t adv_data;
+
+	// Initialize advertisement report for parsing.
+	adv_data.p_data = (uint8_t *) p_adv_report->data;
+	adv_data.data_len = p_adv_report->dlen;
+
+	err_code = adv_report_parse(BLE_GAP_AD_TYPE_128BIT_SERVICE_UUID_MORE_AVAILABLE, &adv_data, uuid_data);
+
+	return err_code;
+}
+
+bool is_128bit_uuid_included(ble_gap_evt_adv_report_t const * p_adv_report, uint8_t const *target_uuid){
+	ret_code_t err_code;
+	bool found = false;
+	data_t uuid_data;
+
+	err_code = get_adv_128bit_uuid(p_adv_report, &uuid_data);
+	if (err_code == NRF_SUCCESS) {
+		if (uuid_data.data_len == 16) {
+			if( memcmp(target_uuid, uuid_data.p_data, 16) == 0 ){
+				found = true;
+			} else { 	//an uuid has been found, but it doesn't mathc the eddystone uuid
+				found = false;
+			}
+		} else {	//the uuid data found is not long 2 (this should never happen)
+			found = false;
+		}
+	} else {	//no 16bit uuid found in the adv packet
+		found = false;
+	}
+
+	return found;
+}
+
+/**@brief Function for handling BLE_GAP_ADV_REPORT events.
+ * Search for a peer with matching device name.
+ * If found, stop advertising and send a connection request to the peer.
+ */
+static void on_ble_gap_evt_adv_report(ble_gap_evt_t const * p_gap_evt) {
+
+	if (!is_128bit_uuid_included(&p_gap_evt->params.adv_report,  m_target_uuid_lit_end)) { //if thingy configuration service is found in advertising data connect the peer!
+		return;
+	}
+
+	ret_code_t err_code = sd_ble_gap_scan_stop();
+    if (err_code != NRF_SUCCESS)
+    {
+        NRF_LOG_ERROR("sd_ble_gap_scan_stop failed - %d\r\n", err_code);
+        return;
+    }
+
+	err_code = sd_ble_gap_connect(&p_gap_evt->params.adv_report.peer_addr, &m_scan_param, &m_conn_param, APP_BLE_CONN_CFG_TAG);
+    if (err_code != NRF_SUCCESS)
+    {
+        NRF_LOG_ERROR("sd_ble_gap_connect failed - %d\r\n", err_code);
+        return;
+    }
+}
+
+static void on_ble_gap_connected(ble_gap_evt_t const * p_gap_evt){
+
+
+    NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_CONNECTED. Connection interval: "NRF_LOG_FLOAT_MARKER" ms, Slave latency: %d, Supervision timeout %d ms.\n\r", NRF_LOG_FLOAT(1.25 * p_gap_evt->params.connected.conn_params.max_conn_interval), p_gap_evt->params.connected.conn_params.slave_latency, p_gap_evt->params.connected.conn_params.conn_sup_timeout * 10 );
+
+    m_conn_handle = p_gap_evt->conn_handle;
+
+    if (p_gap_evt->params.connected.role == BLE_GAP_ROLE_CENTRAL) {
+
+        uint32_t err_code = sd_ble_gattc_exchange_mtu_request(m_conn_handle, NRF_BLE_MAX_MTU_SIZE);
+    	APP_ERROR_CHECK(err_code);
+    }
+
+    m_ble_evt_t evt;
+    evt.evt_type = thingy_ble_evt_connected;
+    m_evt_handler(&evt);
+}
+
+static void on_ble_gap_disconnected(ble_gap_evt_t const * p_gap_evt){
+    NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_DISCONNECTED. Reason: 0x%x \r\n", p_gap_evt->params.disconnected.reason);
+    m_conn_handle = BLE_CONN_HANDLE_INVALID;
+
+    if (flash_access_ongoing())
+    {
+        m_flash_disconnect = true;
+    }
+    else
+    {
+        m_flash_disconnect = false;
+        m_ble_evt_t evt;
+        evt.evt_type = thingy_ble_evt_disconnected;
+        m_evt_handler(&evt);
+    }
+}
 /**@brief Function for the application's SoftDevice event handler.
  *
  * @param[in] p_ble_evt SoftDevice event.
@@ -352,33 +542,18 @@ static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
 static void on_ble_evt(ble_evt_t * p_ble_evt)
 {
     uint32_t                       err_code;
-    m_ble_evt_t                    evt;
 
     switch (p_ble_evt->header.evt_id)
     {
+    	case BLE_GAP_EVT_ADV_REPORT:
+            on_ble_gap_evt_adv_report(&p_ble_evt->evt.gap_evt);
+            break;
         case BLE_GAP_EVT_CONNECTED:
-            NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_CONNECTED\r\n");
-            m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
-
-            evt.evt_type = thingy_ble_evt_connected;
-            m_evt_handler(&evt);
+            on_ble_gap_connected(&p_ble_evt->evt.gap_evt);
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
-            NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_DISCONNECTED. Reason: 0x%x \r\n", p_ble_evt->evt.gap_evt.params.disconnected.reason);
-            m_conn_handle = BLE_CONN_HANDLE_INVALID;
-
-            if (flash_access_ongoing())
-            {
-                m_flash_disconnect = true;
-            }
-            else
-            {
-                m_flash_disconnect = false;
-                evt.evt_type = thingy_ble_evt_disconnected;
-                m_evt_handler(&evt);
-            }
-
+            on_ble_gap_disconnected(&p_ble_evt->evt.gap_evt);
             break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
@@ -402,7 +577,7 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
         {
             NRF_LOG_INFO("on_ble_evt: BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST - %d\r\n", p_ble_evt->evt.gatts_evt.params.exchange_mtu_request.client_rx_mtu);
             err_code = sd_ble_gatts_exchange_mtu_reply(p_ble_evt->evt.gatts_evt.conn_handle,
-                                                       NRF_BLE_MAX_MTU_SIZE);
+            		p_ble_evt->evt.gatts_evt.params.exchange_mtu_request.client_rx_mtu);
             APP_ERROR_CHECK(err_code);
 
             m_mtu.size = p_ble_evt->evt.gatts_evt.params.exchange_mtu_request.client_rx_mtu;
@@ -412,15 +587,16 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
         break; // BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST
 
         case BLE_GATTC_EVT_EXCHANGE_MTU_RSP:
+        	sd_ble_gap_data_length_update(p_ble_evt->evt.gap_evt.conn_handle, &m_dl_params, &limitations);
             NRF_LOG_INFO("on_ble_evt: BLE_GATTC_EVT_EXCHANGE_MTU_RSP - %d\r\n", p_ble_evt->evt.gattc_evt.params.exchange_mtu_rsp.server_rx_mtu);
             break;
 
         case BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST:
             /* Allow SoftDevice to choose Data Length Update Procedure parameters
             automatically. */
-            NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST\r\n");
             err_code = sd_ble_gap_data_length_update(p_ble_evt->evt.gap_evt.conn_handle, NULL, NULL);
             APP_ERROR_CHECK(err_code);
+            NRF_LOG_INFO("on_ble_evt: BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST\r\n");
             break;
         
         case BLE_GAP_EVT_DATA_LENGTH_UPDATE:
@@ -516,15 +692,16 @@ static uint32_t ble_stack_init(void)
     // Configure long MTU.
     memset(&ble_cfg, 0, sizeof(ble_cfg));
     ble_cfg.conn_cfg.conn_cfg_tag = CONN_CFG_TAG_THINGY;
-    ble_cfg.conn_cfg.params.gatt_conn_cfg.att_mtu = 276;
+    ble_cfg.conn_cfg.params.gatt_conn_cfg.att_mtu = NRF_BLE_GATT_MAX_MTU_SIZE;
     err_code = sd_ble_cfg_set(BLE_CONN_CFG_GATT, &ble_cfg, app_ram_start);
     APP_ERROR_CHECK(err_code);
     
-    // Configure event length (7.5ms)
+
     memset(&ble_cfg, 0, sizeof(ble_cfg));
-    ble_cfg.conn_cfg.conn_cfg_tag = CONN_CFG_TAG_THINGY;
-    ble_cfg.conn_cfg.params.gap_conn_cfg.conn_count = 1;
-    ble_cfg.conn_cfg.params.gap_conn_cfg.event_length = 6;
+    // Configure event length (7.5ms)
+    ble_cfg.conn_cfg.conn_cfg_tag                       = CONN_CFG_TAG_THINGY;
+    ble_cfg.conn_cfg.params.gap_conn_cfg.conn_count     = PERIPHERAL_LINK_COUNT + CENTRAL_LINK_COUNT;
+    ble_cfg.conn_cfg.params.gap_conn_cfg.event_length   = 320;
     err_code = sd_ble_cfg_set(BLE_CONN_CFG_GAP, &ble_cfg, app_ram_start);
     APP_ERROR_CHECK(err_code);
     
@@ -543,12 +720,15 @@ static uint32_t ble_stack_init(void)
     APP_ERROR_CHECK(err_code);
     
     memset(&ble_cfg, 0, sizeof(ble_cfg));    
-    ble_cfg.common_cfg.vs_uuid_cfg.vs_uuid_count = 2;
+    ble_cfg.common_cfg.vs_uuid_cfg.vs_uuid_count = 3;
     err_code = sd_ble_cfg_set(BLE_COMMON_CFG_VS_UUID, &ble_cfg, app_ram_start);
     APP_ERROR_CHECK(err_code);
 
     memset(&ble_cfg, 0, sizeof(ble_cfg));
-    ble_cfg.gap_cfg.role_count_cfg.periph_role_count  = 1;
+    ble_cfg.gap_cfg.role_count_cfg.periph_role_count  = PERIPHERAL_LINK_COUNT;
+    ble_cfg.gap_cfg.role_count_cfg.central_role_count = CENTRAL_LINK_COUNT;
+    ble_cfg.gap_cfg.role_count_cfg.central_sec_count  = CENTRAL_LINK_COUNT ?
+                                                        BLE_GAP_ROLE_COUNT_CENTRAL_SEC_DEFAULT : 0;
     err_code = sd_ble_cfg_set(BLE_GAP_CFG_ROLE_COUNT, &ble_cfg, app_ram_start);
     APP_ERROR_CHECK(err_code);
     
@@ -590,6 +770,11 @@ static uint32_t ble_stack_init(void)
         return err_code;
     }
 
+    err_code = sd_ble_gap_tx_power_set(4);
+    if (err_code != NRF_SUCCESS)
+    {
+        return err_code;
+    }
     return NRF_SUCCESS;
 }
 
@@ -642,6 +827,13 @@ static uint32_t advertising_init(void)
     RETURN_IF_ERROR(err_code);
     
     ble_advertising_conn_cfg_tag_set(CONN_CFG_TAG_THINGY);
+    return NRF_SUCCESS;
+}
+
+/**@brief Function for initializing the Advertising functionality.
+ */
+static uint32_t scanner_init(void)
+{
     return NRF_SUCCESS;
 }
 
@@ -1039,6 +1231,15 @@ uint32_t m_ble_init(m_ble_init_t * p_params)
         return err_code;
     }
 
+    err_code = scanner_init();
+
+    if (err_code != NRF_SUCCESS)
+    {
+        NRF_LOG_ERROR("scanner_init failed - %d\r\n", err_code);
+        return err_code;
+    }
+
+
     err_code = conn_params_init();
 
     if (err_code != NRF_SUCCESS)
@@ -1054,7 +1255,7 @@ uint32_t m_ble_init(m_ble_init_t * p_params)
         NRF_LOG_ERROR("ble_advertising_start failed - %d\r\n", err_code);
         return err_code;
     }
-    
+
     err_code = support_func_ble_mac_address_get(m_mac_addr);
 
     if (err_code != NRF_SUCCESS)
@@ -1081,6 +1282,15 @@ uint32_t m_ble_init(m_ble_init_t * p_params)
     {
         NRF_LOG_ERROR("timeslot_init failed - %d\r\n", err_code);
         return err_code;
+    }
+
+	err_code = sd_ble_gap_scan_start(&m_scan_param);
+    if (err_code != NRF_SUCCESS)
+    {
+        NRF_LOG_ERROR("sd_ble_gap_scan_start failed - %d\r\n", err_code);
+        return err_code;
+    }else{
+    	NRF_LOG_INFO("sd_ble_gap_scan_start SUCCESS!");
     }
 
     return NRF_SUCCESS;

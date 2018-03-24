@@ -42,6 +42,9 @@ $(abspath ../../../sdk_components/nfc/t2t_lib/nfc_t2t_lib_gcc.a) \
 
 #source common to all targets
 C_SOURCE_FILES += \
+$(abspath ../../../source/ble_services/ble_tss_c.c) \
+$(abspath ../../../sdk_components/ble/ble_db_discovery/ble_db_discovery.c) \
+$(abspath ../../../sdk_components/ble/nrf_ble_gatt/nrf_ble_gatt.c) \
 $(abspath ../main.c) \
 $(abspath ../../../source/modules/m_ble.c) \
 $(abspath ../../../source/modules/m_ble_flash.c) \
@@ -150,6 +153,8 @@ $(abspath ../../../sdk_components/libraries/strerror/nrf_strerror.c) \
 ASM_SOURCE_FILES  = $(abspath ../../../sdk_components/toolchain/gcc/gcc_startup_nrf52.S)
 
 #includes common to all targets
+INC_PATHS += -I$(abspath ../../../sdk_components/ble/ble_db_discovery)
+INC_PATHS += -I$(abspath ../../../sdk_components/ble/nrf_ble_gatt)
 INC_PATHS += -I$(abspath ../config)
 INC_PATHS += -I$(abspath ../../../external/segger_rtt)
 INC_PATHS += -I$(abspath ../../../include/ble_services)
@@ -262,6 +267,7 @@ CFLAGS += -DBLE_DFU_APP_SUPPORT
 CFLAGS += -DNRF_DFU_SETTINGS_VERSION=1
 CFLAGS += -DAUDIO_EQ_DEF=3
 CFLAGS += -DHAL_NFC_ENGINEERING_BC_FTPAN_WORKAROUND
+CFLAGS += -DDEBUG
 #
 CFLAGS += -mcpu=cortex-m4
 CFLAGS += -mthumb -mabi=aapcs --std=gnu99
@@ -270,7 +276,8 @@ CFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16
 # keep every function in separate section. This will allow linker to dump unused functions
 CFLAGS += -ffunction-sections -fdata-sections -fno-strict-aliasing
 CFLAGS += -fno-builtin --short-enums
-#CFLAGS += -NRF_LOG_ENABLED=1 # Use if RTT output is desired.
+#CFLAGS += -DNRF_LOG_ENABLED=1 # Use if RTT output is desired.
+CFLAGS += -DBLE_DB_DISCOVERY_ENABLED=1
 # keep every function in separate section. This will allow linker to dump unused functions
 
 LDFLAGS += -Xlinker -Map=$(LISTING_DIRECTORY)/$(OUTPUT_FILENAME).map

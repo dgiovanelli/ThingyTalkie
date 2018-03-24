@@ -105,7 +105,7 @@
 
 // <o> PDM Decimation Filter Gain <0x00-0x50>
 // <i> For details on the PDM decimation filter, see the 'Decimation filter' section in the nRF52 Product Specification document.
-#define CONFIG_PDM_GAIN 0x34
+#define CONFIG_PDM_GAIN 0x50
 
 // <o> PDM Microphone Transient State Length [ms] <1-1000>
 // <i> Set the length of the PDM microphone transient state. In this state, the microphone produces invalid data after wakeup or after it is powered on.

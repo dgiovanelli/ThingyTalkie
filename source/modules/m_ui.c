@@ -48,10 +48,21 @@
 #include "nrf_drv_gpiote.h"
 #include "app_scheduler.h"
 #include "app_timer.h"
+#include "drv_mic.h"
 
 #define  NRF_LOG_MODULE_NAME "m_ui          "
 #include "nrf_log.h"
 #include "macros_common.h"
+
+// <o> SCAN_INTERVAL - Scanning interval, determines scan interval in units of 0.625 millisecond.
+#ifndef SCAN_INTERVAL
+#define SCAN_INTERVAL 80
+#endif
+
+// <o> SCAN_WINDOW - Scanning window, determines scan window in units of 0.625 millisecond.
+#ifndef SCAN_WINDOW
+#define SCAN_WINDOW 80
+#endif
 
 static ble_uis_led_t     * mp_config_ui;
 static ble_uis_t           m_uis;
@@ -357,8 +368,7 @@ static void button_evt_handler(uint8_t pin_no, uint8_t button_action)
 
     if (pin_no == BUTTON)
     {
-        //If Thingy is connected to a Central.
-        if (m_uis.conn_handle != BLE_CONN_HANDLE_INVALID)
+        if (m_uis.conn_handle != BLE_CONN_HANDLE_INVALID) //if a connection is active start mic driver)
         {
             err_code = ble_uis_on_button_change(&m_uis, button_action);
             if (err_code != NRF_ERROR_INVALID_STATE
@@ -366,8 +376,38 @@ static void button_evt_handler(uint8_t pin_no, uint8_t button_action)
             {
                 APP_ERROR_CHECK(err_code);
             }
-        }
-    }
+
+    		if (button_action == APP_BUTTON_PUSH) {
+    			err_code = drv_mic_start();
+    			if (err_code != NRF_SUCCESS) {
+    				NRF_LOG_ERROR("error\r\n");
+    			}
+    		} else {
+    			err_code = drv_mic_stop();
+    			if (err_code != NRF_SUCCESS) {
+    				NRF_LOG_ERROR("error\r\n");
+    			}
+    		}
+        }else{ //if no connection is active the button triggers the discovery
+			if (button_action == APP_BUTTON_PUSH) {
+				// Scan parameters requested for scanning and connection.
+				ble_gap_scan_params_t const m_scan_param = {
+						.active = 0x00,
+						.interval = SCAN_INTERVAL,
+						.window = SCAN_WINDOW,
+						.use_whitelist = 0x00,
+						.adv_dir_report = 0x00,
+						.timeout = 30,
+				};
+
+				err_code = sd_ble_gap_scan_start(&m_scan_param);
+				if (err_code != NRF_SUCCESS) {
+					NRF_LOG_WARNING("sd_ble_gap_scan_start failed - %d\r\n", err_code);
+					return;
+				}
+			}
+		}
+	}
 }
 
 

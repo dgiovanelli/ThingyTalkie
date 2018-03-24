@@ -37,16 +37,25 @@
  */
 
 #include <string.h>
+#include <stdint.h>
 #include "app_util_platform.h"
 #include "m_sound.h"
 #include "drv_speaker.h"
 #include "drv_mic.h"
 #include "ble_tss.h"
 #define  NRF_LOG_MODULE_NAME "m_sound       "
+#define NRF_LOG_LEVEL 4
 #include "nrf_log.h"
 #include "macros_common.h"
+#include "ble_tss_c.h"
+
+#define NRF_SDH_BLE_CENTRAL_LINK_COUNT 1
 
 static ble_tss_t              m_tss;  /**< Structure to identify the Thingy Sound Service. */
+static ble_tss_c_t			  m_tss_c;
+
+static bool 				  gatt_client_has_speaker = false;
+static uint16_t 			  actual_mtu = BLE_GATT_ATT_MTU_DEFAULT;
 
 static void drv_speaker_evt_handler(drv_speaker_evt_t evt)
 {
@@ -79,7 +88,6 @@ static void drv_speaker_evt_handler(drv_speaker_evt_t evt)
     }
 }
 
-
 static uint32_t drv_mic_data_handler(m_audio_frame_t * p_frame)
 {
     uint32_t err_code;
@@ -89,13 +97,35 @@ static uint32_t drv_mic_data_handler(m_audio_frame_t * p_frame)
         NRF_LOG_WARNING("drv_mic_data_handler: size = %d \r\n", p_frame->data_size);
     }
 
-    err_code = ble_tss_mic_set(&m_tss, p_frame->data, p_frame->data_size);
-    if (err_code != NRF_SUCCESS)
-    {
-        NRF_LOG_ERROR("drv_mic_data_handler: Failed to send\r\n");
-    }
+	if (!gatt_client_has_speaker) {
+		err_code = ble_tss_mic_set(&m_tss, p_frame->data, p_frame->data_size);
+		if (err_code != NRF_SUCCESS) {
+			NRF_LOG_ERROR("drv_mic_data_handler: Failed to send\r\n");
+		}
+	} else {
 
-    return NRF_SUCCESS;
+		uint16_t chunk_size_max=actual_mtu;
+		uint8_t chunk=0, num_of_chunks=p_frame->pcm_data_len/actual_mtu;
+		if (p_frame->pcm_data_len % chunk_size_max)
+			num_of_chunks++;
+
+		for (uint8_t chunk = 0; chunk < num_of_chunks; chunk++) {
+			uint16_t chunk_size;
+			if ((chunk + 1) * chunk_size_max > p_frame->pcm_data_len)
+				chunk_size = p_frame->pcm_data_len % chunk_size_max;
+			else
+				chunk_size = chunk_size_max;
+
+			err_code = ble_tss_c_speaker_frame_send(&m_tss_c, &p_frame->pcm_data[chunk * chunk_size_max], chunk_size);
+
+			if (err_code != NRF_SUCCESS) {
+				NRF_LOG_ERROR("drv_mic_data_handler: Failed to send to peer's speaker\r\n");
+			} else {
+				//NRF_LOG_INFO("drv_mic_data_handler: frame put in queue, size: %d\r\n", p_frame->pdm_data_len);
+			}
+		}
+	}
+	return NRF_SUCCESS;
 }
 
 /**@brief Function for handling event from the Thingy Sound Service.
@@ -199,6 +229,80 @@ static void ble_tss_evt_handler( ble_tss_t        * p_tes,
     }
 }
 
+/**@brief Function for handling Database Discovery events.
+ *
+ * @details This function is a callback function to handle events from the database discovery module.
+ *          Depending on the UUIDs that are discovered, this function should forward the events
+ *          to their respective service instances.
+ *
+ * @param[in] p_evt  Pointer to the database discovery event.
+ */
+static void db_disc_evt_handler(ble_db_discovery_evt_t * p_evt)
+{
+	ble_tss_on_db_disc_evt(&m_tss_c, p_evt);
+}
+
+/**@brief Handles events coming from the Thingy sound central module.
+ *
+ * @param[in] p_lbs_c     The instance of LBS_C that triggered the event.
+ * @param[in] p_lbs_c_evt The LBS_C event.
+ */
+static void ble_tss_c_evt_handler(ble_tss_c_t * p_tss_c, ble_tss_c_evt_t * p_tss_c_evt)
+{
+    ret_code_t err_code;
+    switch (p_tss_c_evt->evt_type)
+    {
+        case BLE_TSS_C_EVT_DISCOVERY_COMPLETE:
+        {
+			gatt_client_has_speaker = true;
+			uint8_t config[] = { BLE_TSS_SPKR_MODE_PCM, BLE_TSS_MIC_MODE_ADPCM };
+			err_code = ble_tss_c_config_send(p_tss_c, config);
+			if (err_code != NRF_SUCCESS) {
+				NRF_LOG_ERROR("error in sending audio config to peer\r\n");
+			}
+			break; // BLE_LBS_C_EVT_DISCOVERY_COMPLETE
+        }
+        case BLE_TSS_C_EVT_SPEAKER_STATUS_NOTIFICATION:
+        {
+        	NRF_LOG_ERROR("BLE_TSS_C_EVT_SPEAKER_STATUS_NOTIFICATION received \r\n");
+
+        	static ble_tss_c_spkr_stat_t speakerStatus;
+        	switch (speakerStatus) {
+        	case BLE_TSS_SPKR_STAT_FINISHED:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		NRF_LOG_INFO("ble_tss_c_evt_handler: BLE_TSS_SPKR_STAT_FINISHED\r\n");
+        		break;
+        	case BLE_TSS_SPKR_STAT_BUFFER_WARNING:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		NRF_LOG_INFO("ble_tss_c_evt_handler: BLE_TSS_SPKR_STAT_BUFFER_WARNING\r\n");
+        		break;
+        	case BLE_TSS_SPKR_STAT_BUFFER_READY:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		NRF_LOG_INFO("ble_tss_c_evt_handler: BLE_TSS_SPKR_STAT_BUFFER_READY\r\n");
+        		break;
+        	case BLE_TSS_SPKR_STAT_PACKET_DISREGARDED:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		NRF_LOG_INFO("ble_tss_c_evt_handler: BLE_TSS_SPKR_STAT_PACKET_DISREGARDED\r\n");
+        		break;
+        	case BLE_TSS_SPKR_STAT_INVALID_COMMAND:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		NRF_LOG_INFO("ble_tss_c_evt_handler: BLE_TSS_SPKR_STAT_INVALID_COMMAND\r\n");
+        		break;
+        	default:
+        		speakerStatus = p_tss_c_evt->params.status;
+        		break;
+		}
+	}
+		break; // BLE_TSS_C_EVT_SPEAKER_STATUS_NOTIFICATION
+        case BLE_TSS_C_EVT_MICROPHONE_NOTIFICATION:
+        {
+        	NRF_LOG_INFO("BLE_TSS_C_EVT_MICROPHONE_NOTIFICATION received \r\n");
+        } break; // BLE_TSS_C_EVT_MICROPHONE_NOTIFICATION
+        default:
+            // No implementation needed.
+            break;
+    }
+}
 
 /**@brief Function for initializing the Thingy Sound Service.
  *
@@ -227,9 +331,23 @@ static uint32_t sound_service_init(bool major_minor_fw_ver_changed)
         return err_code;
     }
 
+    //DG
+    err_code = ble_db_discovery_init(db_disc_evt_handler); //TODO: move this into ble_tss_c.c? maybe no because in ble_tss_c.c there is no way to get the pointer to m_tss_c
+    if (err_code != NRF_SUCCESS)
+    {
+        return err_code;
+    }
+
+    ble_tss_c_init_t tss_c_init_obj;
+
+    tss_c_init_obj.evt_handler = ble_tss_c_evt_handler;
+
+    m_tss_c.uuid_type = m_tss.uuid_type; //tss and tss_c have the same uuid, then copu uuid_type
+    err_code = ble_tss_c_init(&m_tss_c, &tss_c_init_obj);
+    APP_ERROR_CHECK(err_code);
+
     return NRF_SUCCESS;
 }
-
 
 /**@brief Function for passing the BLE event to the Thingy Sound service.
  *
@@ -239,14 +357,20 @@ static uint32_t sound_service_init(bool major_minor_fw_ver_changed)
  */
 static void sound_on_ble_evt(ble_evt_t * p_ble_evt)
 {
-    uint32_t err_code;
-    ble_tss_on_ble_evt(&m_tss, p_ble_evt);
+	uint32_t err_code;
+	ble_tss_on_ble_evt(&m_tss, p_ble_evt);
+	ble_tss_c_on_ble_evt(&m_tss_c, p_ble_evt);
 
-    if (p_ble_evt->header.evt_id == BLE_GAP_EVT_DISCONNECTED)
-    {
-        err_code = drv_mic_stop();
-        APP_ERROR_CHECK(err_code);
-    }
+	if (p_ble_evt->header.evt_id == BLE_GAP_EVT_DISCONNECTED) {
+		err_code = drv_mic_stop();
+		APP_ERROR_CHECK(err_code);
+		gatt_client_has_speaker = false;
+	}
+
+	if (p_ble_evt->header.evt_id == BLE_GATTC_EVT_EXCHANGE_MTU_RSP) {
+		actual_mtu = p_ble_evt->evt.gattc_evt.params.exchange_mtu_rsp.server_rx_mtu;
+		NRF_LOG_INFO("on_ble_evt: BLE_GATTC_EVT_EXCHANGE_MTU_RSP - %d\r\n", p_ble_evt->evt.gattc_evt.params.exchange_mtu_rsp.server_rx_mtu);
+	}
 }
 
 
